@@ -6,7 +6,7 @@ import com.vitalis.assistant.AudioPlayback
 import com.vitalis.assistant.ElevenLabsClient
 import com.vitalis.foodlog.FoodLogRepository
 import com.vitalis.foodlog.FoodLogSummary
-import com.vitalis.settings.VitalisSettings
+import com.vitalis.profile.PromptContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -16,14 +16,17 @@ private const val TAG = "Vitalis:VoiceController"
 /**
  * Drives one voice turn: STT → agent → execute tool / speak response. State changes are pushed to
  * the host via [publishState].
+ *
+ * The host (AssistantViewModel) supplies a [PromptContext] each turn so the agent sees fresh
+ * profile + macro-balance information without us re-querying repositories here.
  */
 class VoiceController(
     private val context: Context,
     private val audio: AudioPlayback,
     private val foodLog: FoodLogRepository,
     private val publishState: (VoiceState) -> Unit,
-    private val onStartMenuScan: () -> Unit,
-    private val onFindRestaurant: (String) -> Unit,
+    private val onStartMenuScan: (preference: String?) -> Unit,
+    private val onFindRestaurant: (query: String) -> Unit,
 ) {
 
   private val recognizer = SpeechRecognizerWrapper(context)
@@ -37,7 +40,7 @@ class VoiceController(
 
   fun startTurn(
       scope: CoroutineScope,
-      settings: VitalisSettings,
+      promptContext: PromptContext,
       anthropicKey: String,
       ttsKey: String,
       ttsVoiceId: String,
@@ -56,7 +59,6 @@ class VoiceController(
             return@launch
           }
 
-          // 1. Listen.
           publishState(VoiceState(phase = VoicePhase.LISTENING))
           val partialJob =
               launch {
@@ -100,32 +102,24 @@ class VoiceController(
             return@launch
           }
 
-          // 2. Think.
           publishState(VoiceState(phase = VoicePhase.THINKING, transcript = transcript))
 
-          val now = System.currentTimeMillis()
-          val agentContext =
-              AgentContext(
-                  personalProfile = settings.personalProfile,
-                  dietaryAvoidance = settings.dietaryAvoidance,
-                  todaySummary = runCatching { foodLog.summarize(startOfTodayMs(now)) }.getOrNull(),
-              )
           val agent = AnthropicAgent(anthropicKey)
           val decision =
-              runCatching { agent.decide(transcript, agentContext) }
+              runCatching { agent.decide(transcript, promptContext) }
                   .onFailure { Log.e(TAG, "Agent call failed", it) }
                   .getOrDefault(AgentDecision.Empty)
 
           when (decision) {
-            is AgentDecision.ToolCall -> handleToolCall(
-                decision = decision,
-                transcript = transcript,
-                agent = agent,
-                agentContext = agentContext,
-                ttsKey = ttsKey,
-                ttsVoiceId = ttsVoiceId,
-                now = now,
-            )
+            is AgentDecision.ToolCall ->
+                handleToolCall(
+                    decision = decision,
+                    transcript = transcript,
+                    agent = agent,
+                    context = promptContext,
+                    ttsKey = ttsKey,
+                    ttsVoiceId = ttsVoiceId,
+                )
             is AgentDecision.TextResponse ->
                 speakAndIdle(decision.text, transcript, ttsKey, ttsVoiceId)
             AgentDecision.Empty ->
@@ -144,15 +138,18 @@ class VoiceController(
       decision: AgentDecision.ToolCall,
       transcript: String,
       agent: AnthropicAgent,
-      agentContext: AgentContext,
+      context: PromptContext,
       ttsKey: String,
       ttsVoiceId: String,
-      now: Long,
   ) {
+    val now = System.currentTimeMillis()
     when (decision.name) {
       TOOL_START_MENU_SCAN -> {
-        Log.d(TAG, "Tool: start_menu_scan")
-        onStartMenuScan()
+        val preference =
+            decision.input.opt("preference")?.takeIf { it != org.json.JSONObject.NULL }
+                ?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        Log.d(TAG, "Tool: start_menu_scan preference='$preference'")
+        onStartMenuScan(preference)
         publishState(VoiceState(phase = VoicePhase.IDLE))
       }
       TOOL_FIND_RESTAURANT -> {
@@ -176,15 +173,13 @@ class VoiceController(
         Log.d(TAG, "Tool: summarize_food_log periodHours=$hours")
         val summary =
             runCatching { foodLog.summarize(now - hours * 3_600_000L) }
-                .getOrDefault(
-                    FoodLogSummary(0, 0, 0.0, 0.0, 0.0, 0, emptyList())
-                )
+                .getOrDefault(FoodLogSummary(0, 0, 0.0, 0.0, 0.0, 0, emptyList()))
         val resultText = formatSummaryForAgent(summary, hours)
         val followUp =
             runCatching {
                   agent.continueAfterTool(
                       transcript = transcript,
-                      context = agentContext,
+                      context = context,
                       previousAssistantContent = decision.rawAssistantContent,
                       toolUseId = decision.id,
                       toolResultText = resultText,
@@ -251,15 +246,4 @@ class VoiceController(
             "${"%.0f".format(s.totalFatG)}g fat). ${s.junkCount} flagged as junk. " +
             "Recent items: $items."
       }
-
-  private fun startOfTodayMs(nowMs: Long): Long {
-    val cal = java.util.Calendar.getInstance().apply {
-      timeInMillis = nowMs
-      set(java.util.Calendar.HOUR_OF_DAY, 0)
-      set(java.util.Calendar.MINUTE, 0)
-      set(java.util.Calendar.SECOND, 0)
-      set(java.util.Calendar.MILLISECOND, 0)
-    }
-    return cal.timeInMillis
-  }
 }

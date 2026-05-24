@@ -38,10 +38,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     viewModelScope.launch { repo.update { it.copy(personalProfile = profile) } }
   }
 
-  fun setDietaryAvoidance(avoidance: String) {
-    viewModelScope.launch { repo.update { it.copy(dietaryAvoidance = avoidance) } }
-  }
-
   fun clearFoodLog() {
     viewModelScope.launch { foodLogRepo.clearAll() }
   }

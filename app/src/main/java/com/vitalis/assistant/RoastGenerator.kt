@@ -2,6 +2,7 @@ package com.vitalis.assistant
 
 import android.graphics.Bitmap
 import android.util.Log
+import com.vitalis.profile.PromptContext
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -32,29 +33,29 @@ class RoastGenerator(private val apiKey: String) {
    * Generates a short, sarcastic roast for the user about the offending item. Returns null on
    * failure so the caller can skip TTS without breaking the food-log loop.
    */
-  suspend fun generate(itemName: String, avoidanceLine: String, frame: Bitmap?): String? =
+  suspend fun generate(itemName: String, context: PromptContext, frame: Bitmap?): String? =
       withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
           Log.w(TAG, "Missing ANTHROPIC_API_KEY — skipping roast")
           return@withContext null
         }
-        val body = buildBody(itemName, avoidanceLine, frame)
+        val body = buildBody(itemName, context, frame)
         val responseText = post(body) ?: return@withContext null
         extractFirstText(responseText)?.trim()?.takeIf { it.isNotEmpty() }
       }
 
-  private fun buildBody(itemName: String, avoidanceLine: String, frame: Bitmap?): String {
-    val avoidance =
-        if (avoidanceLine.isBlank()) "who is trying to eat healthier"
-        else avoidanceLine
+  private fun buildBody(itemName: String, context: PromptContext, frame: Bitmap?): String {
     val prompt =
         """
         You are the user's witty, sarcastic friend who keeps them honest about their eating goals.
-        $avoidance
         You just spotted them about to eat $itemName. Write ONE short roast (1-2 sentences, max
-        ~30 words) that will make them put it down. Be playful, specific to what is in the image,
-        and a little dramatic. Do NOT be cruel, preachy, or use slurs. No emojis. No quotation
-        marks. Output only the roast text, nothing else.
+        ~30 words) that will make them put it down. Be playful, specific to what is in the image
+        and to their CURRENT macro state, and a little dramatic. If their carbs/fat are running
+        hot or their protein is low, riff on that specifically. Do NOT be cruel, preachy, or use
+        slurs. No emojis. No quotation marks. Output only the roast text, nothing else.
+
+        USER CONTEXT:
+        ${context.toSystemBlurb()}
         """.trimIndent()
 
     val content = JSONArray()

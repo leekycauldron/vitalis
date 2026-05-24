@@ -30,7 +30,7 @@ import androidx.activity.viewModels
 import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
-import com.vitalis.ui.VitalisScaffold
+import com.vitalis.ui.AppRoot
 import com.vitalis.wearables.WearablesViewModel
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellableContinuation
@@ -81,8 +81,8 @@ class MainActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
     enableEdgeToEdge()
     setContent {
-      VitalisScaffold(
-          viewModel = viewModel,
+      AppRoot(
+          wearablesViewModel = viewModel,
           onRequestWearablesPermission = ::requestWearablesPermission,
       )
     }

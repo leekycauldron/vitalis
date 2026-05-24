@@ -1,7 +1,7 @@
 package com.vitalis.voice
 
 import android.util.Log
-import com.vitalis.foodlog.FoodLogSummary
+import com.vitalis.profile.PromptContext
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -39,11 +39,11 @@ sealed interface AgentDecision {
   data object Empty : AgentDecision
 }
 
-data class AgentContext(
-    val personalProfile: String,
-    val dietaryAvoidance: String,
-    val todaySummary: FoodLogSummary?,
-)
+/**
+ * Backwards-compatible alias — the voice agent takes a [PromptContext] (profile + macro balance +
+ * recent labels) plus the spoken transcript.
+ */
+typealias AgentContext = PromptContext
 
 class AnthropicAgent(private val apiKey: String) {
 
@@ -156,32 +156,26 @@ class AnthropicAgent(private val apiKey: String) {
   }
 
   private fun systemPrompt(context: AgentContext): String {
-    val profile =
-        if (context.personalProfile.isBlank()) "(no profile)" else context.personalProfile
-    val avoidance =
-        if (context.dietaryAvoidance.isBlank()) "(none)" else context.dietaryAvoidance
-    val today =
-        context.todaySummary?.let { s ->
-          "${s.entryCount} items so far today — ${s.totalCalories} kcal, " +
-              "${"%.0f".format(s.totalProteinG)}g P, ${"%.0f".format(s.totalCarbsG)}g C, " +
-              "${"%.0f".format(s.totalFatG)}g F. ${s.junkCount} flagged as junk."
-        } ?: "(no entries logged today)"
-
     return """
         You are Vitalis, a heads-up nutrition assistant running on Ray-Ban Meta glasses. The user
         just spoke to you; their words are in the user message. Decide what to do.
 
         Rules:
         - Prefer calling a tool when the user's intent matches one. Otherwise reply in plain text.
+        - When the user expresses a preference inside a tool-worthy request ("scan the menu, I like
+          steak" / "find pizza, low carb please"), preserve that preference verbatim in the tool's
+          query argument so the downstream model can use it.
+        - When recommending or answering, integrate ALL of: profile, DNA notes, today's macros vs
+          targets, current imbalances. Don't say things at odds with their stated goals.
         - Text replies must be ONE sentence, max ~25 words, spoken aloud via TTS, no markdown.
         - Tools available:
-          • $TOOL_START_MENU_SCAN — they're looking at a menu and want a recommendation.
+          • $TOOL_START_MENU_SCAN — they're looking at a menu and want a recommendation. Include
+            their stated preference (if any) in the `preference` arg so the menu picker uses it.
           • $TOOL_FIND_RESTAURANT(query) — they want to find a nearby restaurant for a craving.
           • $TOOL_SUMMARIZE_FOOD_LOG(period_hours) — they're asking about what they've eaten.
 
-        User profile: $profile
-        Dietary avoidance: $avoidance
-        Today's food log: $today
+        USER CONTEXT:
+        ${context.toSystemBlurb()}
         """.trimIndent()
   }
 
@@ -192,13 +186,25 @@ class AnthropicAgent(private val apiKey: String) {
           put(
               "description",
               "Activate the menu scanner. Use when the user says things like 'scan this menu', " +
-                  "'what should I order', 'help me pick'.",
+                  "'what should I order', 'help me pick'. Pass any preference the user mentioned " +
+                  "(e.g. 'I like steak', 'low carb') as the `preference` field.",
           )
           put(
               "input_schema",
               JSONObject().apply {
                 put("type", "object")
-                put("properties", JSONObject())
+                put(
+                    "properties",
+                    JSONObject().apply {
+                      put(
+                          "preference",
+                          JSONObject().apply {
+                            put("type", JSONArray().put("string").put("null"))
+                            put("description", "User's stated preference, in their own words. Null if none.")
+                          },
+                      )
+                    },
+                )
                 put("required", JSONArray())
               },
           )

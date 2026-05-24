@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.util.Log
 import com.vitalis.foodlog.FoodDetection
 import com.vitalis.foodlog.FoodInfo
+import com.vitalis.profile.PromptContext
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -50,11 +51,7 @@ class AnthropicFoodDetector(
    * detections (possibly empty). On network or parse failure returns an empty list so the calling
    * loop can keep ticking.
    */
-  suspend fun detect(
-      bitmap: Bitmap,
-      avoidanceLine: String,
-      recentlyLoggedLabels: List<String>,
-  ): List<FoodDetection> =
+  suspend fun detect(bitmap: Bitmap, context: PromptContext): List<FoodDetection> =
       withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) {
           Log.w(TAG, "Missing ANTHROPIC_API_KEY — skipping detection")
@@ -64,7 +61,7 @@ class AnthropicFoodDetector(
         if (!isFoodScene(bitmap)) return@withContext emptyList()
 
         val imageB64 = BitmapEncoding.toBase64Jpeg(bitmap, maxDim = 1024, quality = 85)
-        val body = buildBody(imageB64, avoidanceLine, recentlyLoggedLabels)
+        val body = buildBody(imageB64, context)
         val responseText = post(body) ?: return@withContext emptyList()
         parseDetections(responseText)
       }
@@ -82,11 +79,7 @@ class AnthropicFoodDetector(
         verdict
       }
 
-  private fun buildBody(
-      imageBase64: String,
-      avoidanceLine: String,
-      recentlyLoggedLabels: List<String>,
-  ): String {
+  private fun buildBody(imageBase64: String, context: PromptContext): String {
     val source =
         JSONObject().apply {
           put("type", "base64")
@@ -99,7 +92,7 @@ class AnthropicFoodDetector(
     }
     val textPart = JSONObject().apply {
       put("type", "text")
-      put("text", buildPrompt(avoidanceLine, recentlyLoggedLabels))
+      put("text", buildPrompt(context))
     }
     val message =
         JSONObject().apply {
@@ -172,15 +165,12 @@ class AnthropicFoodDetector(
     }
   }
 
-  private fun buildPrompt(avoidanceLine: String, recentlyLoggedLabels: List<String>): String {
-    val avoidance =
-        if (avoidanceLine.isBlank()) "with no specific dietary restriction"
-        else "whose stated avoidance is: $avoidanceLine"
+  private fun buildPrompt(context: PromptContext): String {
     val knownLabels =
         knownFoods.keys.sorted().joinToString(", ").ifBlank { "(none — estimate everything)" }
     val recent =
-        if (recentlyLoggedLabels.isEmpty()) "(nothing logged yet this session)"
-        else recentlyLoggedLabels.joinToString(", ")
+        if (context.recentLabels.isEmpty()) "(nothing logged yet this session)"
+        else context.recentLabels.joinToString(", ")
 
     return """
         You are a nutrition vision assistant analyzing a live first-person camera frame from the
@@ -195,8 +185,14 @@ class AnthropicFoodDetector(
             not "cup of hot coffee", "burger" not "cheeseburger on a plate". This name is used for
             deduplication, so be consistent across calls when shown the same item.
           - calories, protein_g, carbs_g, fat_g: best estimate for ONE typical serving.
-          - is_junk: true if it is junk / off-plan for someone $avoidance.
+          - is_junk: true if it is junk food (deep-fried, added sugar, refined carbs, alcohol) OR
+            if eating it now would push the user FURTHER from today's macro targets given their
+            current totals (e.g. carbs already at 90% of target → another carb-heavy item is junk).
+
         If there is no food or drink in the frame, return an empty foods array.
+
+        USER CONTEXT (incorporate when choosing is_junk):
+        ${context.toSystemBlurb()}
 
         KNOWN LABELS: $knownLabels
 

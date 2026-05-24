@@ -14,10 +14,16 @@ import com.vitalis.foodlog.FoodsCsvLoader
 import com.vitalis.foodlog.db.FoodLogEntity
 import com.vitalis.placesearch.LocationProvider
 import com.vitalis.placesearch.PlacesClient
+import com.vitalis.profile.MacroBalance
+import com.vitalis.profile.MacroTargets
+import com.vitalis.profile.ProfileRepository
+import com.vitalis.profile.PromptContext
+import com.vitalis.profile.UserProfile
 import com.vitalis.settings.SettingsRepository
 import com.vitalis.settings.VitalisSettings
 import com.vitalis.voice.VoiceController
 import com.vitalis.voice.VoiceState
+import java.util.Calendar
 import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -27,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -39,10 +46,27 @@ private const val ROAST_COOLDOWN_MS = 60_000L
 class AssistantViewModel(application: Application) : AndroidViewModel(application) {
 
   private val settingsRepo = SettingsRepository(application)
+  private val profileRepo = ProfileRepository.get(application)
   private val knownFoods = FoodsCsvLoader.load(application)
   private val foodLogRepo = FoodLogRepository.create(application)
   private val audio = AudioPlayback(application)
   private val locationProvider = LocationProvider(application)
+
+  private suspend fun buildPromptContext(): PromptContext {
+    val profile = profileRepo.profile.first()
+    val targets = MacroTargets.fromProfile(profile)
+    val summary = foodLogRepo.summarize(startOfTodayMs())
+    val balance = MacroBalance.compute(summary, targets)
+    val recent = foodLogRepo.recentlySeenLabels()
+    return PromptContext(profile = profile, macroBalance = balance, recentLabels = recent)
+  }
+
+  private fun startOfTodayMs(): Long {
+    val c = Calendar.getInstance().apply {
+      set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+    }
+    return c.timeInMillis
+  }
 
   /**
    * Set by [AssistantScreen] inside a DisposableEffect — gives the voice controller a way to
@@ -60,9 +84,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
           audio = audio,
           foodLog = foodLogRepo,
           publishState = { newState -> _uiState.update { it.copy(voice = newState) } },
-          onStartMenuScan = {
+          onStartMenuScan = { preference ->
             val provider = captureStillProvider
-            if (provider != null) startMenuScanning(provider)
+            if (provider != null) startMenuScanningWithPreference(preference, provider)
             else
                 Log.w(TAG, "Voice menu-scan requested but stream isn't active yet — ignoring")
           },
@@ -91,6 +115,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
   private var foodLogJob: Job? = null
 
   private val lastRoastAt = mutableMapOf<String, Long>()
+  @Volatile private var pendingMenuPreference: String? = null
 
   fun updateLatestFrame(bitmap: Bitmap?) {
     latestFrame = bitmap
@@ -118,13 +143,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
         val frame = latestFrame ?: continue
         val snapshot = frame.copy(frame.config ?: Bitmap.Config.ARGB_8888, false)
         try {
-          val avoidance = settings.value.dietaryAvoidance
-          val recent = foodLogRepo.recentlySeenLabels()
+          val context = buildPromptContext()
           val detections =
-              runCatching { detector.detect(snapshot, avoidance, recent) }
+              runCatching { detector.detect(snapshot, context) }
                   .onFailure { Log.e(TAG, "Food detection failed", it) }
                   .getOrDefault(emptyList())
-          handleDetections(detections, snapshot, avoidance)
+          handleDetections(detections, snapshot, context)
         } finally {
           snapshot.recycle()
         }
@@ -140,7 +164,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
   private suspend fun handleDetections(
       detections: List<FoodDetection>,
       frame: Bitmap,
-      avoidanceLine: String,
+      context: PromptContext,
   ) {
     if (detections.isEmpty()) return
     var anyLogged = false
@@ -149,7 +173,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
       if (logged) {
         anyLogged = true
         Log.d(TAG, "Logged: ${d.name} (${d.calories} kcal, junk=${d.isJunk})")
-        if (d.isJunk) maybeRoast(d, frame, avoidanceLine)
+        if (d.isJunk) maybeRoast(d, frame, context)
       }
     }
     if (anyLogged) {
@@ -157,7 +181,7 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     }
   }
 
-  private fun maybeRoast(detection: FoodDetection, frame: Bitmap, avoidanceLine: String) {
+  private fun maybeRoast(detection: FoodDetection, frame: Bitmap, context: PromptContext) {
     val key = (detection.label ?: detection.name).lowercase()
     val now = System.currentTimeMillis()
     val last = lastRoastAt[key]
@@ -172,13 +196,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
       return
     }
 
-    // Snapshot the frame for the roast model (independent lifecycle from the scanning loop).
     val frameCopy = frame.copy(frame.config ?: Bitmap.Config.ARGB_8888, false)
     viewModelScope.launch {
       try {
         val roaster = RoastGenerator(anthropicKey)
         val text =
-            roaster.generate(detection.name, avoidanceLine, frameCopy)
+            roaster.generate(detection.name, context, frameCopy)
                 ?: return@launch
         Log.d(TAG, "Roast: $text")
         val tts = ElevenLabsClient(elevenKey, voiceId)
@@ -195,6 +218,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
   // ============================================================
   // Menu sub-mode
   // ============================================================
+
+  /** Voice-triggered helper: store the spoken preference, then start scanning. */
+  fun startMenuScanningWithPreference(preference: String?, captureStill: suspend () -> Bitmap?) {
+    pendingMenuPreference = preference?.takeIf { it.isNotBlank() }
+    startMenuScanning(captureStill)
+  }
 
   fun startMenuScanning(captureStill: suspend () -> Bitmap?) {
     if (_uiState.value.phase == AssistantPhase.MENU_SCANNING ||
@@ -285,7 +314,6 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   private suspend fun analyzeMenu(menuBitmap: Bitmap) {
-    val currentSettings = settings.value
     val ocrLines =
         runCatching { MenuOcr.extract(menuBitmap) }
             .onFailure { Log.e(TAG, "OCR failed", it) }
@@ -305,16 +333,19 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
 
     val anthropic = AnthropicClient(BuildConfig.ANTHROPIC_API_KEY)
     val itemTexts = ocrLines.map { it.text }
+    val promptContext = buildPromptContext()
     val recs =
         runCatching {
               anthropic.recommend(
                   menuBitmap = menuBitmap,
-                  personalProfile = currentSettings.personalProfile,
+                  context = promptContext,
                   knownMenuItems = itemTexts,
+                  extraVoicePreference = pendingMenuPreference,
               )
             }
             .onFailure { Log.e(TAG, "Recommendation call failed", it) }
             .getOrDefault(emptyList())
+    pendingMenuPreference = null
 
     if (recs.isEmpty()) {
       _uiState.update {
@@ -565,13 +596,16 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
   // ============================================================
 
   fun startVoiceTurn() {
-    voiceController.startTurn(
-        scope = viewModelScope,
-        settings = settings.value,
-        anthropicKey = BuildConfig.ANTHROPIC_API_KEY,
-        ttsKey = BuildConfig.ELEVENLABS_API_KEY,
-        ttsVoiceId = BuildConfig.ELEVENLABS_VOICE_ID,
-    )
+    viewModelScope.launch {
+      val context = buildPromptContext()
+      voiceController.startTurn(
+          scope = viewModelScope,
+          promptContext = context,
+          anthropicKey = BuildConfig.ANTHROPIC_API_KEY,
+          ttsKey = BuildConfig.ELEVENLABS_API_KEY,
+          ttsVoiceId = BuildConfig.ELEVENLABS_VOICE_ID,
+      )
+    }
   }
 
   fun cancelVoice() {

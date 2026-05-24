@@ -2,6 +2,7 @@ package com.vitalis.assistant
 
 import android.graphics.Bitmap
 import android.util.Log
+import com.vitalis.profile.PromptContext
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
@@ -60,12 +61,13 @@ class AnthropicClient(private val apiKey: String) {
    */
   suspend fun recommend(
       menuBitmap: Bitmap,
-      personalProfile: String,
+      context: PromptContext,
       knownMenuItems: List<String>,
+      extraVoicePreference: String? = null,
   ): List<Recommendation> =
       withContext(Dispatchers.IO) {
         val imageB64 = BitmapEncoding.toBase64Jpeg(menuBitmap, maxDim = 1280, quality = 85)
-        val prompt = buildRecommendPrompt(personalProfile, knownMenuItems)
+        val prompt = buildRecommendPrompt(context, knownMenuItems, extraVoicePreference)
         val body =
             buildMessagesBody(
                 model = SONNET_MODEL,
@@ -80,21 +82,33 @@ class AnthropicClient(private val apiKey: String) {
         parsed.filter { rec -> rec.itemName.lowercase() in allowedLower || allowedLower.any { it.contains(rec.itemName.lowercase()) } }
       }
 
-  private fun buildRecommendPrompt(profile: String, items: List<String>): String {
-    val profileBlock = if (profile.isBlank()) "(no profile provided)" else profile
+  private fun buildRecommendPrompt(
+      context: PromptContext,
+      items: List<String>,
+      extraVoicePreference: String?,
+  ): String {
     val itemsBlock = items.joinToString(separator = "\n") { "- $it" }
+    val voiceBlock =
+        if (extraVoicePreference.isNullOrBlank()) "(none)"
+        else extraVoicePreference
     return """
         You are a dietary recommendation assistant for a heads-up nutrition app called Vitalis.
 
-        User profile:
-        $profileBlock
+        USER CONTEXT (profile, DNA notes, today's macros vs targets, current imbalances):
+        ${context.toSystemBlurb()}
 
-        OCR-extracted menu items (use these exact strings for item_name; do not invent items):
+        VOICE PREFERENCE expressed by the user just now (e.g. "I'm in the mood for steak"):
+        $voiceBlock
+
+        OCR-extracted menu items (use these EXACT strings for item_name; do not invent items):
         $itemsBlock
 
-        Pick 1 to 3 items from the list above that best fit the profile. Respond with a single JSON object,
-        no prose, no code fences. Schema:
-        {"recommendations":[{"item_name":"<exact string from list>","reason":"<one sentence>"}]}
+        Pick 1 to 3 items from the list above that best fit ALL of: profile, DNA, today's macro
+        deficits, and the voice preference (if any). Weight macro shortfall heavily — if protein is
+        low, lean protein. If the user is over their carb target, deprioritise heavy carbs.
+
+        Respond with a single JSON object, no prose, no code fences. Schema:
+        {"recommendations":[{"item_name":"<exact string from list>","reason":"<one sentence weighing the user context>"}]}
         """.trimIndent()
   }
 
