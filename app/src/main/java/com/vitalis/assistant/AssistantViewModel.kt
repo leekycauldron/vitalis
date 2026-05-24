@@ -1,0 +1,393 @@
+package com.vitalis.assistant
+
+import android.app.Application
+import android.graphics.Bitmap
+import android.util.Log
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import com.vitalis.BuildConfig
+import com.vitalis.foodlog.FoodDetection
+import com.vitalis.foodlog.FoodLogRepository
+import com.vitalis.foodlog.FoodsCsvLoader
+import com.vitalis.foodlog.db.FoodLogEntity
+import com.vitalis.settings.SettingsRepository
+import com.vitalis.settings.VitalisSettings
+import java.util.UUID
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+private const val TAG = "Vitalis:AssistantViewModel"
+private const val MENU_SAMPLE_INTERVAL_MS = 3_000L
+private const val FOOD_SAMPLE_INTERVAL_MS = 3_000L
+private const val ROAST_COOLDOWN_MS = 60_000L
+
+class AssistantViewModel(application: Application) : AndroidViewModel(application) {
+
+  private val settingsRepo = SettingsRepository(application)
+  private val knownFoods = FoodsCsvLoader.load(application)
+  private val foodLogRepo = FoodLogRepository.create(application)
+  private val audio = AudioPlayback(application)
+
+  private val _uiState = MutableStateFlow(AssistantUiState())
+  val uiState: StateFlow<AssistantUiState> = _uiState.asStateFlow()
+
+  val settings: StateFlow<VitalisSettings> =
+      settingsRepo.settings.stateIn(
+          scope = viewModelScope,
+          started = SharingStarted.WhileSubscribed(5_000L),
+          initialValue = VitalisSettings(),
+      )
+
+  val recentFoodLog: StateFlow<List<FoodLogEntity>> =
+      foodLogRepo
+          .observeRecent(limit = 50)
+          .stateIn(
+              scope = viewModelScope,
+              started = SharingStarted.WhileSubscribed(5_000L),
+              initialValue = emptyList(),
+          )
+
+  @Volatile private var latestFrame: Bitmap? = null
+
+  private var menuJob: Job? = null
+  private var foodLogJob: Job? = null
+
+  private val lastRoastAt = mutableMapOf<String, Long>()
+
+  fun updateLatestFrame(bitmap: Bitmap?) {
+    latestFrame = bitmap
+  }
+
+  // ============================================================
+  // Food-logging loop (default behaviour)
+  // ============================================================
+
+  fun startFoodLogging() {
+    if (foodLogJob?.isActive == true) return
+    if (BuildConfig.ANTHROPIC_API_KEY.isBlank()) {
+      Log.w(TAG, "Skipping food logging — ANTHROPIC_API_KEY missing")
+      return
+    }
+    val detector = AnthropicFoodDetector(BuildConfig.ANTHROPIC_API_KEY, knownFoods)
+    foodLogJob = viewModelScope.launch {
+      while (true) {
+        delay(FOOD_SAMPLE_INTERVAL_MS)
+        if (_uiState.value.phase != AssistantPhase.LOGGING &&
+            _uiState.value.phase != AssistantPhase.ERROR) {
+          // Paused while menu sub-mode is running.
+          continue
+        }
+        val frame = latestFrame ?: continue
+        val snapshot = frame.copy(frame.config ?: Bitmap.Config.ARGB_8888, false)
+        try {
+          val avoidance = settings.value.dietaryAvoidance
+          val recent = foodLogRepo.recentlySeenLabels()
+          val detections =
+              runCatching { detector.detect(snapshot, avoidance, recent) }
+                  .onFailure { Log.e(TAG, "Food detection failed", it) }
+                  .getOrDefault(emptyList())
+          handleDetections(detections, snapshot, avoidance)
+        } finally {
+          snapshot.recycle()
+        }
+      }
+    }
+  }
+
+  fun stopFoodLogging() {
+    foodLogJob?.cancel()
+    foodLogJob = null
+  }
+
+  private suspend fun handleDetections(
+      detections: List<FoodDetection>,
+      frame: Bitmap,
+      avoidanceLine: String,
+  ) {
+    if (detections.isEmpty()) return
+    var anyLogged = false
+    for (d in detections) {
+      val logged = foodLogRepo.tryLog(d)
+      if (logged) {
+        anyLogged = true
+        Log.d(TAG, "Logged: ${d.name} (${d.calories} kcal, junk=${d.isJunk})")
+        if (d.isJunk) maybeRoast(d, frame, avoidanceLine)
+      }
+    }
+    if (anyLogged) {
+      viewModelScope.launch { audio.playDing() }
+    }
+  }
+
+  private fun maybeRoast(detection: FoodDetection, frame: Bitmap, avoidanceLine: String) {
+    val key = (detection.label ?: detection.name).lowercase()
+    val now = System.currentTimeMillis()
+    val last = lastRoastAt[key]
+    if (last != null && now - last < ROAST_COOLDOWN_MS) return
+    lastRoastAt[key] = now
+
+    val anthropicKey = BuildConfig.ANTHROPIC_API_KEY
+    val elevenKey = BuildConfig.ELEVENLABS_API_KEY
+    val voiceId = BuildConfig.ELEVENLABS_VOICE_ID
+    if (anthropicKey.isBlank() || elevenKey.isBlank() || voiceId.isBlank()) {
+      Log.w(TAG, "Skipping roast — one of ANTHROPIC/ELEVENLABS keys is missing")
+      return
+    }
+
+    // Snapshot the frame for the roast model (independent lifecycle from the scanning loop).
+    val frameCopy = frame.copy(frame.config ?: Bitmap.Config.ARGB_8888, false)
+    viewModelScope.launch {
+      try {
+        val roaster = RoastGenerator(anthropicKey)
+        val text =
+            roaster.generate(detection.name, avoidanceLine, frameCopy)
+                ?: return@launch
+        Log.d(TAG, "Roast: $text")
+        val tts = ElevenLabsClient(elevenKey, voiceId)
+        val bytes = tts.synthesize(text) ?: return@launch
+        audio.playTtsBytes(bytes)
+      } catch (e: Exception) {
+        Log.e(TAG, "Roast pipeline failed", e)
+      } finally {
+        frameCopy.recycle()
+      }
+    }
+  }
+
+  // ============================================================
+  // Menu sub-mode
+  // ============================================================
+
+  fun startMenuScanning(captureStill: suspend () -> Bitmap?) {
+    if (_uiState.value.phase == AssistantPhase.MENU_SCANNING ||
+        _uiState.value.phase == AssistantPhase.MENU_ANALYZING) {
+      Log.d(TAG, "startMenuScanning: already running, ignoring")
+      return
+    }
+    val key = BuildConfig.ANTHROPIC_API_KEY
+    if (key.isBlank()) {
+      _uiState.update {
+        it.copy(
+            phase = AssistantPhase.ERROR,
+            errorMessage =
+                "ANTHROPIC_API_KEY is missing from local.properties. Add it and rebuild.",
+        )
+      }
+      return
+    }
+
+    _uiState.update {
+      it.copy(
+          phase = AssistantPhase.MENU_SCANNING,
+          statusMessage = "Look at a menu…",
+          capturedMenu = null,
+          recommendations = emptyList(),
+          selectedRecommendationId = null,
+          errorMessage = null,
+      )
+    }
+
+    menuJob?.cancel()
+    menuJob = viewModelScope.launch {
+      val anthropic = AnthropicClient(key)
+      while (_uiState.value.phase == AssistantPhase.MENU_SCANNING) {
+        delay(MENU_SAMPLE_INTERVAL_MS)
+        if (_uiState.value.phase != AssistantPhase.MENU_SCANNING) break
+        val frame = latestFrame
+        if (frame == null) {
+          Log.d(TAG, "No frame yet, will retry")
+          continue
+        }
+        val snapshot = frame.copy(frame.config ?: Bitmap.Config.ARGB_8888, false)
+        val isMenu =
+            runCatching { anthropic.isMenu(snapshot) }
+                .onFailure { Log.e(TAG, "Menu classifier failed", it) }
+                .getOrDefault(false)
+        if (!isMenu) {
+          snapshot.recycle()
+          continue
+        }
+
+        _uiState.update { it.copy(statusMessage = "Menu detected — capturing still…") }
+        val highRes =
+            runCatching { captureStill() }
+                .onFailure { Log.e(TAG, "captureStill threw", it) }
+                .getOrNull()
+        val menuBitmap =
+            if (highRes != null) {
+              snapshot.recycle()
+              highRes
+            } else {
+              Log.w(TAG, "High-res capture unavailable; falling back to video frame")
+              snapshot
+            }
+        onMenuDetected(menuBitmap)
+        return@launch
+      }
+    }
+  }
+
+  fun cancelMenuScanning() {
+    menuJob?.cancel()
+    menuJob = null
+    _uiState.update {
+      it.copy(phase = AssistantPhase.LOGGING, statusMessage = null, errorMessage = null)
+    }
+  }
+
+  private fun onMenuDetected(menuBitmap: Bitmap) {
+    _uiState.update {
+      it.copy(
+          phase = AssistantPhase.MENU_ANALYZING,
+          capturedMenu = menuBitmap,
+          statusMessage = "Menu detected — reading items…",
+      )
+    }
+    viewModelScope.launch { analyzeMenu(menuBitmap) }
+  }
+
+  private suspend fun analyzeMenu(menuBitmap: Bitmap) {
+    val currentSettings = settings.value
+    val ocrLines =
+        runCatching { MenuOcr.extract(menuBitmap) }
+            .onFailure { Log.e(TAG, "OCR failed", it) }
+            .getOrDefault(emptyList())
+
+    if (ocrLines.isEmpty()) {
+      _uiState.update {
+        it.copy(
+            phase = AssistantPhase.ERROR,
+            errorMessage = "Couldn't read any text from this menu. Try scanning again.",
+        )
+      }
+      return
+    }
+
+    _uiState.update { it.copy(statusMessage = "Asking Sonnet for recommendations…") }
+
+    val anthropic = AnthropicClient(BuildConfig.ANTHROPIC_API_KEY)
+    val itemTexts = ocrLines.map { it.text }
+    val recs =
+        runCatching {
+              anthropic.recommend(
+                  menuBitmap = menuBitmap,
+                  personalProfile = currentSettings.personalProfile,
+                  knownMenuItems = itemTexts,
+              )
+            }
+            .onFailure { Log.e(TAG, "Recommendation call failed", it) }
+            .getOrDefault(emptyList())
+
+    if (recs.isEmpty()) {
+      _uiState.update {
+        it.copy(
+            phase = AssistantPhase.ERROR,
+            errorMessage = "No recommendations returned. Try again or refine your profile.",
+        )
+      }
+      return
+    }
+
+    _uiState.update { it.copy(statusMessage = "Fetching photos…") }
+
+    val pexelsKey = BuildConfig.PEXELS_API_KEY
+    val pexels = if (pexelsKey.isNotBlank()) PexelsClient(pexelsKey) else null
+
+    val withBoxes = recs.mapNotNull { rec ->
+      val match = matchToOcrLine(rec.itemName, ocrLines) ?: return@mapNotNull null
+      MenuRecommendation(
+          id = UUID.randomUUID().toString(),
+          itemName = rec.itemName,
+          reason = rec.reason,
+          box = match.box,
+          pexelsImageUrl = null,
+      )
+    }
+
+    if (withBoxes.isEmpty()) {
+      _uiState.update {
+        it.copy(
+            phase = AssistantPhase.ERROR,
+            errorMessage = "Recommendations didn't line up with the menu text. Try again.",
+        )
+      }
+      return
+    }
+
+    val enriched =
+        if (pexels != null) {
+          withBoxes
+              .map { rec ->
+                viewModelScope.async {
+                  rec.copy(pexelsImageUrl = pexels.firstImageUrl(rec.itemName))
+                }
+              }
+              .awaitAll()
+        } else {
+          withBoxes
+        }
+
+    _uiState.update {
+      it.copy(
+          phase = AssistantPhase.MENU_RESULTS,
+          recommendations = enriched,
+          statusMessage = null,
+      )
+    }
+  }
+
+  private fun matchToOcrLine(itemName: String, ocrLines: List<OcrLine>): OcrLine? {
+    val target = itemName.lowercase()
+    return ocrLines.firstOrNull { it.text.lowercase() == target }
+        ?: ocrLines.firstOrNull { it.text.lowercase().contains(target) }
+        ?: ocrLines.firstOrNull { target.contains(it.text.lowercase()) }
+  }
+
+  fun selectRecommendation(id: String?) {
+    _uiState.update { it.copy(selectedRecommendationId = id) }
+  }
+
+  fun resetMenuToLogging() {
+    menuJob?.cancel()
+    menuJob = null
+    _uiState.update {
+      it.copy(
+          phase = AssistantPhase.LOGGING,
+          statusMessage = null,
+          capturedMenu = null,
+          recommendations = emptyList(),
+          selectedRecommendationId = null,
+          errorMessage = null,
+      )
+    }
+  }
+
+  fun retryFromError() {
+    resetMenuToLogging()
+  }
+
+  override fun onCleared() {
+    super.onCleared()
+    menuJob?.cancel()
+    foodLogJob?.cancel()
+    // Cooldown map lives on this VM-scoped FoodLogRepository instance, so it dies with us.
+  }
+
+  class Factory(private val application: Application) : ViewModelProvider.Factory {
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+      require(modelClass.isAssignableFrom(AssistantViewModel::class.java))
+      @Suppress("UNCHECKED_CAST") return AssistantViewModel(application) as T
+    }
+  }
+}
