@@ -23,6 +23,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -34,7 +37,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vitalis.ui.common.ProgressRing
 import com.vitalis.ui.common.SectionLabel
-import com.vitalis.ui.common.Sparkline
 import com.vitalis.ui.common.VCard
 import com.vitalis.ui.theme.VColors
 import com.vitalis.wearables.WearablesUiState
@@ -45,7 +47,6 @@ import java.util.Locale
 @Composable
 fun HomeDashboardScreen(
     wearablesState: WearablesUiState,
-    onOpenGlasses: () -> Unit,
     onOpenGenetic: () -> Unit,
     onOpenManualAdd: () -> Unit,
     modifier: Modifier = Modifier,
@@ -126,56 +127,11 @@ fun HomeDashboardScreen(
       )
     }
 
-    // AI Health Score card
-    VCard {
-      Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionLabel("AI HEALTH SCORE")
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-          Text(
-              text = "${state.healthScore}",
-              color = VColors.Ink,
-              style = MaterialTheme.typography.displayMedium,
-              fontWeight = FontWeight.Bold,
-          )
-          Sparkline(
-              data = listOf(64f, 66f, 65f, 69f, 71f, 72f, state.healthScore.toFloat()),
-              color = VColors.Purple,
-              modifier = Modifier.height(40.dp).fillMaxWidth().padding(start = 24.dp),
-          )
-        }
-        Text(
-            text = healthScoreCaption(state),
-            color = VColors.Teal,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.Medium,
-        )
-      }
-    }
-
     // Top insight
-    VCard(accent = VColors.Purple) {
-      Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        SectionLabel("TOP INSIGHT")
-        Text(
-            text = topInsightText(state),
-            color = VColors.Ink,
-            style = MaterialTheme.typography.bodyMedium,
-        )
-        Text(
-            text = "See details ›",
-            color = VColors.PurpleL,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-        )
-      }
-    }
+    TopInsightCard(text = topInsightText(state))
 
-    // Glasses connect card
-    GlassesConnectCard(wearablesState = wearablesState, onClick = onOpenGlasses)
+    // Glasses live-status pill (passive — Assistant tab launches the flow)
+    GlassesStatusCard(wearablesState = wearablesState)
 
     // 2x2 quick nav
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -226,12 +182,6 @@ fun HomeDashboardScreen(
   }
 }
 
-private fun healthScoreCaption(state: HomeDashboardState): String {
-  if (state.summary.entryCount == 0) return "Log a meal to start tracking."
-  val flags = state.balance.imbalances.size
-  return if (flags == 0) "+${flags} ↑ on track today" else "${flags} thing${if (flags == 1) "" else "s"} to watch today"
-}
-
 private fun topInsightText(state: HomeDashboardState): String {
   if (state.balance.imbalances.isNotEmpty()) return state.balance.imbalances.first().text
   if (state.summary.entryCount == 0)
@@ -240,9 +190,42 @@ private fun topInsightText(state: HomeDashboardState): String {
 }
 
 @Composable
-private fun GlassesConnectCard(wearablesState: WearablesUiState, onClick: () -> Unit) {
+private fun TopInsightCard(text: String) {
+  var expanded by remember(text) { mutableStateOf(false) }
+  var overflowing by remember(text) { mutableStateOf(false) }
+  VCard(accent = VColors.Purple) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+      SectionLabel("TOP INSIGHT")
+      Text(
+          text = text,
+          color = VColors.Ink,
+          style = MaterialTheme.typography.bodyMedium,
+          maxLines = if (expanded) Int.MAX_VALUE else 3,
+          overflow = if (expanded) androidx.compose.ui.text.style.TextOverflow.Clip
+                     else androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+          onTextLayout = { result ->
+            // Latch true on the collapsed pass — don't reset to false when expanded shows all lines.
+            if (!expanded && result.hasVisualOverflow) overflowing = true
+          },
+      )
+      if (overflowing) {
+        Text(
+            text = if (expanded) "Show less" else "Read more",
+            color = VColors.PurpleL,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.clickable { expanded = !expanded },
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun GlassesStatusCard(wearablesState: WearablesUiState) {
   val connected = wearablesState.isRegistered && wearablesState.hasActiveDevice
-  VCard(onClick = onClick) {
+  val dotColor = if (connected) VColors.Teal else VColors.InkLo
+  VCard {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
       Box(
           modifier =
@@ -250,24 +233,28 @@ private fun GlassesConnectCard(wearablesState: WearablesUiState, onClick: () -> 
                   .background(if (connected) VColors.Teal.copy(alpha = 0.18f) else Color(0x0AFFFFFF)),
           contentAlignment = Alignment.Center,
       ) {
-        Text(text = if (connected) "👓" else "🔗", style = MaterialTheme.typography.titleLarge)
+        Text(text = "👓", style = MaterialTheme.typography.titleLarge)
       }
       Column(modifier = Modifier.weight(1f)) {
         Text(
-            text = if (connected) "Glasses connected" else "Connect Ray-Ban Meta",
+            text = "Ray-Ban Meta",
             color = VColors.Ink,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
         )
-        Text(
-            text =
-                if (connected) "Tap to start the assistant — passive logging + voice."
-                else "Pair your glasses to enable passive food logging.",
-            color = VColors.InkMd,
-            style = MaterialTheme.typography.bodySmall,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+          Box(modifier = Modifier.size(7.dp).clip(RoundedCornerShape(99.dp)).background(dotColor))
+          Text(
+              text = if (connected) "Connected" else "Not connected",
+              color = if (connected) VColors.Teal else VColors.InkMd,
+              style = MaterialTheme.typography.bodySmall,
+              fontWeight = FontWeight.Medium,
+          )
+        }
       }
-      Text(text = "›", color = VColors.PurpleL, style = MaterialTheme.typography.titleLarge)
     }
   }
 }

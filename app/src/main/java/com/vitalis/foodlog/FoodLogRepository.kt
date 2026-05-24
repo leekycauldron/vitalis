@@ -123,6 +123,16 @@ class FoodLogRepository(private val dao: FoodLogDao) {
     Log.d(TAG, "Cleared all food log entries")
   }
 
+  suspend fun deleteEntry(id: Long) {
+    dao.deleteById(id)
+    Log.d(TAG, "Deleted entry id=$id")
+  }
+
+  suspend fun updateEntry(entry: FoodLogEntity) {
+    dao.update(entry)
+    Log.d(TAG, "Updated entry id=${entry.id} name='${entry.name}'")
+  }
+
   /** Aggregates entries logged in the last [sinceMs] milliseconds. */
   suspend fun summarize(sinceMs: Long): FoodLogSummary {
     val entries = dao.listSince(sinceMs)

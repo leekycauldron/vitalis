@@ -1,6 +1,7 @@
 package com.vitalis.ui.common
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,46 +23,23 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.vitalis.R
 import com.vitalis.ui.theme.VColors
 
 // ----- VitalisLogo + Wordmark ------------------------------------------------
 
 @Composable
 fun VitalisLogo(modifier: Modifier = Modifier, size: androidx.compose.ui.unit.Dp = 32.dp) {
-  Box(modifier = modifier.size(size), contentAlignment = Alignment.Center) {
-    Canvas(modifier = Modifier.size(size)) {
-      val cx = this.size.width / 2f
-      val cy = this.size.height / 2f
-      val r = (this.size.width / 2f) * 0.9f
-      drawCircle(
-          brush =
-              Brush.radialGradient(
-                  colors =
-                      listOf(
-                          Color(0xFFC4B5FD),
-                          VColors.Purple,
-                          Color(0xFF4C1D95),
-                      ),
-                  center = Offset(cx * 0.7f, cy * 0.7f),
-                  radius = r * 1.4f,
-              ),
-          radius = r,
-          center = Offset(cx, cy),
-      )
-      drawCircle(
-          color = Color(0xFFDDD6FE).copy(alpha = 0.65f),
-          radius = r * 0.22f,
-          center = Offset(cx - r * 0.30f, cy - r * 0.30f),
-      )
-    }
-  }
+  Image(
+      painter = painterResource(id = R.drawable.inapp_icon),
+      contentDescription = null,
+      modifier = modifier.size(size),
+  )
 }
 
 @Composable

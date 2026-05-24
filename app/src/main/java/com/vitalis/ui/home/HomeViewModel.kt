@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vitalis.foodlog.FoodLogRepository
 import com.vitalis.foodlog.FoodLogSummary
+import com.vitalis.foodlog.db.FoodLogEntity
 import com.vitalis.profile.MacroBalance
 import com.vitalis.profile.MacroTargets
 import com.vitalis.profile.ProfileRepository
@@ -16,9 +17,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 data class HomeDashboardState(
     val profile: UserProfile = UserProfile(),
@@ -26,7 +27,7 @@ data class HomeDashboardState(
     val targets: MacroTargets = MacroTargets.Default,
     val balance: MacroBalance =
         MacroBalance.compute(FoodLogSummary(0, 0, 0.0, 0.0, 0.0, 0, emptyList()), MacroTargets.Default),
-    val healthScore: Int = 72,
+    val entries: List<FoodLogEntity> = emptyList(),
 )
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
@@ -44,23 +45,27 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
   }
 
   val state: StateFlow<HomeDashboardState> =
-      combine(profileRepo.profile, foodLogRepo.observeRecent(limit = 500), tick) { profile, _, _ ->
+      combine(profileRepo.profile, foodLogRepo.observeRecent(limit = 500), tick) { profile, recent, _ ->
         val targets = MacroTargets.fromProfile(profile)
-        val summary = foodLogRepo.summarize(startOfTodayMs())
+        val startMs = startOfTodayMs()
+        val summary = foodLogRepo.summarize(startMs)
         val balance = MacroBalance.compute(summary, targets)
+        val todayEntries = recent.filter { it.timestamp >= startMs }
         HomeDashboardState(
             profile = profile,
             summary = summary,
             targets = targets,
             balance = balance,
-            healthScore = computeHealthScore(balance),
+            entries = todayEntries,
         )
       }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), HomeDashboardState())
 
-  private fun computeHealthScore(b: MacroBalance): Int {
-    // Cheap derived score: 100 minus penalties for imbalances.
-    val penalty = b.imbalances.size * 7
-    return (100 - penalty).coerceIn(40, 100)
+  fun deleteEntry(id: Long) {
+    viewModelScope.launch { foodLogRepo.deleteEntry(id) }
+  }
+
+  fun updateEntry(entry: FoodLogEntity) {
+    viewModelScope.launch { foodLogRepo.updateEntry(entry) }
   }
 
   private fun startOfTodayMs(): Long {

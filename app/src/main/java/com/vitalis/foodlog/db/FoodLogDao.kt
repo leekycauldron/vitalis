@@ -3,12 +3,17 @@ package com.vitalis.foodlog.db
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.Query
+import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface FoodLogDao {
 
   @Insert suspend fun insert(entry: FoodLogEntity): Long
+
+  @Update suspend fun update(entry: FoodLogEntity)
+
+  @Query("DELETE FROM food_log WHERE id = :id") suspend fun deleteById(id: Long)
 
   @Query("SELECT * FROM food_log ORDER BY timestamp DESC LIMIT :limit")
   fun observeRecent(limit: Int): Flow<List<FoodLogEntity>>

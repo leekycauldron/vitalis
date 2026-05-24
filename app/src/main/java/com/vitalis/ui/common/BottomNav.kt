@@ -31,7 +31,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import com.vitalis.ui.theme.VColors
 
-enum class VTab { Home, Trends, Add, Insights, Profile }
+enum class VTab { Home, Log, Add, Assistant, Profile }
 
 @Composable
 fun BottomNav(
@@ -51,9 +51,9 @@ fun BottomNav(
       horizontalArrangement = Arrangement.SpaceAround,
   ) {
     NavTabItem(label = "Home", active = active == VTab.Home, onClick = { onSelect(VTab.Home) }) { c -> HomeIcon(c) }
-    NavTabItem(label = "Trends", active = active == VTab.Trends, onClick = { onSelect(VTab.Trends) }) { c -> TrendsIcon(c) }
+    NavTabItem(label = "Log", active = active == VTab.Log, onClick = { onSelect(VTab.Log) }) { c -> LogIcon(c) }
     AddButton(onClick = { onSelect(VTab.Add) })
-    NavTabItem(label = "Insights", active = active == VTab.Insights, onClick = { onSelect(VTab.Insights) }) { c -> InsightsIcon(c) }
+    NavTabItem(label = "Assistant", active = active == VTab.Assistant, onClick = { onSelect(VTab.Assistant) }) { c -> AssistantIcon(c) }
     NavTabItem(label = "Profile", active = active == VTab.Profile, onClick = { onSelect(VTab.Profile) }) { c -> ProfileIcon(c) }
   }
 }
@@ -123,43 +123,37 @@ fun HomeIcon(color: Color = VColors.InkLo) {
 }
 
 @Composable
-fun TrendsIcon(color: Color = VColors.InkLo) {
+fun LogIcon(color: Color = VColors.InkLo) {
   Canvas(modifier = Modifier.size(22.dp)) {
     val s = 1.6.dp.toPx()
     val w = size.width
     val h = size.height
-    val path1 = Path().apply {
-      moveTo(w * 0.14f, h * 0.72f)
-      lineTo(w * 0.36f, h * 0.50f)
-      lineTo(w * 0.55f, h * 0.64f)
-      lineTo(w * 0.86f, h * 0.27f)
+    val page = Path().apply {
+      moveTo(w * 0.20f, h * 0.14f)
+      lineTo(w * 0.80f, h * 0.14f)
+      lineTo(w * 0.80f, h * 0.86f)
+      lineTo(w * 0.20f, h * 0.86f)
+      close()
     }
-    val path2 = Path().apply {
-      moveTo(w * 0.63f, h * 0.27f)
-      lineTo(w * 0.86f, h * 0.27f)
-      lineTo(w * 0.86f, h * 0.5f)
-    }
-    drawPath(path1, color, style = Stroke(s, cap = StrokeCap.Round, join = StrokeJoin.Round))
-    drawPath(path2, color, style = Stroke(s, cap = StrokeCap.Round, join = StrokeJoin.Round))
+    drawPath(page, color, style = Stroke(s, join = StrokeJoin.Round, cap = StrokeCap.Round))
+    drawLine(color, Offset(w * 0.30f, h * 0.36f), Offset(w * 0.70f, h * 0.36f), s, cap = StrokeCap.Round)
+    drawLine(color, Offset(w * 0.30f, h * 0.52f), Offset(w * 0.70f, h * 0.52f), s, cap = StrokeCap.Round)
+    drawLine(color, Offset(w * 0.30f, h * 0.68f), Offset(w * 0.58f, h * 0.68f), s, cap = StrokeCap.Round)
   }
 }
 
 @Composable
-fun InsightsIcon(color: Color = VColors.InkLo) {
+fun AssistantIcon(color: Color = VColors.InkLo) {
   Canvas(modifier = Modifier.size(22.dp)) {
     val s = 1.6.dp.toPx()
     val w = size.width
     val h = size.height
-    val bulb = Path().apply {
-      moveTo(w * 0.32f, h * 0.58f)
-      lineTo(w * 0.32f, h * 0.66f)
-      lineTo(w * 0.68f, h * 0.66f)
-      lineTo(w * 0.68f, h * 0.58f)
-    }
-    drawPath(bulb, color, style = Stroke(s, join = StrokeJoin.Round))
-    drawCircle(color, radius = w * 0.30f, center = Offset(w / 2f, h * 0.38f), style = Stroke(s))
-    drawLine(color, Offset(w * 0.36f, h * 0.77f), Offset(w * 0.64f, h * 0.77f), s, cap = StrokeCap.Round)
-    drawLine(color, Offset(w * 0.40f, h * 0.86f), Offset(w * 0.60f, h * 0.86f), s, cap = StrokeCap.Round)
+    val r = w * 0.20f
+    drawCircle(color, radius = r, center = Offset(w * 0.28f, h * 0.55f), style = Stroke(s))
+    drawCircle(color, radius = r, center = Offset(w * 0.72f, h * 0.55f), style = Stroke(s))
+    drawLine(color, Offset(w * 0.48f, h * 0.55f), Offset(w * 0.52f, h * 0.55f), s, cap = StrokeCap.Round)
+    drawLine(color, Offset(w * 0.08f, h * 0.45f), Offset(w * 0.16f, h * 0.40f), s, cap = StrokeCap.Round)
+    drawLine(color, Offset(w * 0.84f, h * 0.40f), Offset(w * 0.92f, h * 0.45f), s, cap = StrokeCap.Round)
   }
 }
 

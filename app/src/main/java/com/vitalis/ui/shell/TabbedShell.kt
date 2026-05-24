@@ -24,19 +24,19 @@ import com.vitalis.ui.common.BottomNav
 import com.vitalis.ui.common.VTab
 import com.vitalis.ui.glasses.GlassesAssistantScreen
 import com.vitalis.ui.home.HomeDashboardScreen
-import com.vitalis.ui.insights.InsightsHubScreen
 import com.vitalis.ui.manualadd.ManualAddSheet
+import com.vitalis.ui.log.LogScreen
 import com.vitalis.ui.profile.GeneticProfileScreen
 import com.vitalis.ui.profile.ProfileScreen
 import com.vitalis.ui.theme.VColors
-import com.vitalis.ui.trends.TrendsHubScreen
 import com.vitalis.wearables.WearablesViewModel
 
 /**
  * Tabbed application shell with bottom navigation. Holds:
- * - Five tabs (Home / Trends / + / Insights / Profile).
+ * - Five tabs (Home / Log / + / Assistant / Profile). The Assistant tab launches the glasses
+ *   assistant flow directly (no body — it takes over fullscreen via `isAssistantMode`).
  * - The manual-add bottom sheet (triggered by + and from anywhere via [showManualAdd]).
- * - The glasses sub-flow as a fullscreen overlay route from Home or Profile.
+ * - The glasses sub-flow as a fullscreen overlay route.
  */
 @Composable
 fun TabbedShell(
@@ -87,13 +87,12 @@ fun TabbedShell(
               VTab.Home ->
                   HomeDashboardScreen(
                       wearablesState = wearablesState,
-                      onOpenGlasses = glassesAction,
                       onOpenGenetic = { geneticOpen = true },
                       onOpenManualAdd = { manualAddOpen = true },
                   )
-              VTab.Trends -> TrendsHubScreen()
+              VTab.Log -> LogScreen()
               VTab.Add -> Box {} // sheet handles it
-              VTab.Insights -> InsightsHubScreen()
+              VTab.Assistant -> Box {} // glasses flow takes over via isAssistantMode
               VTab.Profile ->
                   ProfileScreen(
                       onOpenGenetic = { geneticOpen = true },
@@ -104,8 +103,11 @@ fun TabbedShell(
           BottomNav(
               active = tab,
               onSelect = { selected ->
-                if (selected == VTab.Add) manualAddOpen = true
-                else tab = selected
+                when (selected) {
+                  VTab.Add -> manualAddOpen = true
+                  VTab.Assistant -> glassesAction()
+                  else -> tab = selected
+                }
               },
           )
         }
