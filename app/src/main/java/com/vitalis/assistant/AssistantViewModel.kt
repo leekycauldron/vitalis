@@ -12,8 +12,12 @@ import com.vitalis.foodlog.FoodDetection
 import com.vitalis.foodlog.FoodLogRepository
 import com.vitalis.foodlog.FoodsCsvLoader
 import com.vitalis.foodlog.db.FoodLogEntity
+import com.vitalis.placesearch.LocationProvider
+import com.vitalis.placesearch.PlacesClient
 import com.vitalis.settings.SettingsRepository
 import com.vitalis.settings.VitalisSettings
+import com.vitalis.voice.VoiceController
+import com.vitalis.voice.VoiceState
 import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -38,9 +42,32 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
   private val knownFoods = FoodsCsvLoader.load(application)
   private val foodLogRepo = FoodLogRepository.create(application)
   private val audio = AudioPlayback(application)
+  private val locationProvider = LocationProvider(application)
+
+  /**
+   * Set by [AssistantScreen] inside a DisposableEffect — gives the voice controller a way to
+   * trigger a high-res still capture without needing a direct StreamViewModel handle. Null when
+   * the stream isn't running.
+   */
+  @Volatile var captureStillProvider: (suspend () -> android.graphics.Bitmap?)? = null
 
   private val _uiState = MutableStateFlow(AssistantUiState())
   val uiState: StateFlow<AssistantUiState> = _uiState.asStateFlow()
+
+  private val voiceController =
+      VoiceController(
+          context = application,
+          audio = audio,
+          foodLog = foodLogRepo,
+          publishState = { newState -> _uiState.update { it.copy(voice = newState) } },
+          onStartMenuScan = {
+            val provider = captureStillProvider
+            if (provider != null) startMenuScanning(provider)
+            else
+                Log.w(TAG, "Voice menu-scan requested but stream isn't active yet — ignoring")
+          },
+          onFindRestaurant = { query -> runRestaurantSearchWithQuery(query) },
+      )
 
   val settings: StateFlow<VitalisSettings> =
       settingsRepo.settings.stateIn(
@@ -377,10 +404,190 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     resetMenuToLogging()
   }
 
+  // ============================================================
+  // Restaurant finder (Google Places API New)
+  // ============================================================
+
+  fun openRestaurantSearch() {
+    val needsPermission = !locationProvider.hasPermission()
+    _uiState.update {
+      it.copy(
+          restaurantSearch =
+              RestaurantSearchState(
+                  visible = true,
+                  phase =
+                      if (needsPermission) RestaurantSearchPhase.NEEDS_LOCATION_PERMISSION
+                      else RestaurantSearchPhase.IDLE,
+              )
+      )
+    }
+  }
+
+  fun closeRestaurantSearch() {
+    _uiState.update { it.copy(restaurantSearch = RestaurantSearchState()) }
+  }
+
+  fun setRestaurantQuery(query: String) {
+    _uiState.update {
+      it.copy(restaurantSearch = it.restaurantSearch.copy(query = query))
+    }
+  }
+
+  /** Call after the user grants location permission via the launcher. */
+  fun onLocationPermissionGranted() {
+    _uiState.update {
+      if (it.restaurantSearch.visible) {
+        it.copy(
+            restaurantSearch =
+                it.restaurantSearch.copy(phase = RestaurantSearchPhase.IDLE, errorMessage = null)
+        )
+      } else it
+    }
+  }
+
+  fun onLocationPermissionDenied() {
+    _uiState.update {
+      it.copy(
+          restaurantSearch =
+              it.restaurantSearch.copy(
+                  phase = RestaurantSearchPhase.NEEDS_LOCATION_PERMISSION,
+                  errorMessage = "Location is required to find nearby restaurants.",
+              )
+      )
+    }
+  }
+
+  fun runRestaurantSearch() {
+    val query = _uiState.value.restaurantSearch.query.trim()
+    if (query.isEmpty()) return
+
+    val apiKey = BuildConfig.GOOGLE_PLACES_API_KEY
+    if (apiKey.isBlank()) {
+      _uiState.update {
+        it.copy(
+            restaurantSearch =
+                it.restaurantSearch.copy(
+                    phase = RestaurantSearchPhase.ERROR,
+                    errorMessage =
+                        "GOOGLE_PLACES_API_KEY is missing from local.properties. Add it and rebuild.",
+                )
+        )
+      }
+      return
+    }
+
+    if (!locationProvider.hasPermission()) {
+      _uiState.update {
+        it.copy(
+            restaurantSearch =
+                it.restaurantSearch.copy(phase = RestaurantSearchPhase.NEEDS_LOCATION_PERMISSION)
+        )
+      }
+      return
+    }
+
+    _uiState.update {
+      it.copy(
+          restaurantSearch =
+              it.restaurantSearch.copy(phase = RestaurantSearchPhase.LOADING, errorMessage = null)
+      )
+    }
+
+    viewModelScope.launch {
+      val location = locationProvider.currentLocation()
+      if (location == null) {
+        _uiState.update {
+          it.copy(
+              restaurantSearch =
+                  it.restaurantSearch.copy(
+                      phase = RestaurantSearchPhase.ERROR,
+                      errorMessage =
+                          "Couldn't get your location. Check that location services are on.",
+                  )
+          )
+        }
+        return@launch
+      }
+
+      val client = PlacesClient(apiKey)
+      val results =
+          runCatching {
+                client.searchRestaurants(
+                    query = query,
+                    userLat = location.latitude,
+                    userLng = location.longitude,
+                )
+              }
+              .onFailure { Log.e(TAG, "Restaurant search failed", it) }
+              .getOrDefault(emptyList())
+
+      if (results.isEmpty()) {
+        _uiState.update {
+          it.copy(
+              restaurantSearch =
+                  it.restaurantSearch.copy(
+                      phase = RestaurantSearchPhase.ERROR,
+                      errorMessage =
+                          "No open restaurants matched \"$query\" within 10 km. Try a different search.",
+                  )
+          )
+        }
+        return@launch
+      }
+
+      _uiState.update {
+        it.copy(
+            restaurantSearch =
+                it.restaurantSearch.copy(
+                    phase = RestaurantSearchPhase.RESULTS,
+                    results = results,
+                    errorMessage = null,
+                )
+        )
+      }
+    }
+  }
+
+  /** Voice-triggered variant: prefill the query, open the sheet, and run the search immediately. */
+  fun runRestaurantSearchWithQuery(query: String) {
+    if (query.isBlank()) return
+    _uiState.update {
+      it.copy(
+          restaurantSearch =
+              it.restaurantSearch.copy(visible = true, query = query, errorMessage = null)
+      )
+    }
+    runRestaurantSearch()
+  }
+
+  // ============================================================
+  // Voice assistant
+  // ============================================================
+
+  fun startVoiceTurn() {
+    voiceController.startTurn(
+        scope = viewModelScope,
+        settings = settings.value,
+        anthropicKey = BuildConfig.ANTHROPIC_API_KEY,
+        ttsKey = BuildConfig.ELEVENLABS_API_KEY,
+        ttsVoiceId = BuildConfig.ELEVENLABS_VOICE_ID,
+    )
+  }
+
+  fun cancelVoice() {
+    voiceController.cancel()
+  }
+
+  fun dismissVoiceOverlay() {
+    _uiState.update { it.copy(voice = VoiceState()) }
+  }
+
   override fun onCleared() {
     super.onCleared()
     menuJob?.cancel()
     foodLogJob?.cancel()
+    voiceController.cancel()
+    captureStillProvider = null
     // Cooldown map lives on this VM-scoped FoodLogRepository instance, so it dies with us.
   }
 

@@ -49,6 +49,17 @@ data class FoodDetection(
     val wasEstimated: Boolean,
 )
 
+data class FoodLogSummary(
+    val entryCount: Int,
+    val totalCalories: Int,
+    val totalProteinG: Double,
+    val totalCarbsG: Double,
+    val totalFatG: Double,
+    val junkCount: Int,
+    /** Up to 5 most-recent item names, newest first, deduped. */
+    val topItems: List<String>,
+)
+
 class FoodLogRepository(private val dao: FoodLogDao) {
 
   private val cooldown = mutableMapOf<String, Long>()
@@ -110,6 +121,21 @@ class FoodLogRepository(private val dao: FoodLogDao) {
     dao.clear()
     cooldownLock.withLock { cooldown.clear() }
     Log.d(TAG, "Cleared all food log entries")
+  }
+
+  /** Aggregates entries logged in the last [sinceMs] milliseconds. */
+  suspend fun summarize(sinceMs: Long): FoodLogSummary {
+    val entries = dao.listSince(sinceMs)
+    if (entries.isEmpty()) {
+      return FoodLogSummary(0, 0, 0.0, 0.0, 0.0, 0, emptyList())
+    }
+    val cals = entries.sumOf { it.calories }
+    val prot = entries.sumOf { it.proteinG }
+    val carb = entries.sumOf { it.carbsG }
+    val fat = entries.sumOf { it.fatG }
+    val junk = entries.count { it.isJunk }
+    val top = entries.map { it.name }.distinct().take(5)
+    return FoodLogSummary(entries.size, cals, prot, carb, fat, junk, top)
   }
 
   private fun dedupKey(detection: FoodDetection): String =

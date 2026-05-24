@@ -132,6 +132,7 @@ fun SettingsScreen(
         KeyStatusRow(label = "Pexels", present = BuildConfig.PEXELS_API_KEY.isNotBlank())
         KeyStatusRow(label = "ElevenLabs", present = BuildConfig.ELEVENLABS_API_KEY.isNotBlank())
         KeyStatusRow(label = "ElevenLabs voice ID", present = BuildConfig.ELEVENLABS_VOICE_ID.isNotBlank())
+        KeyStatusRow(label = "Google Places", present = BuildConfig.GOOGLE_PLACES_API_KEY.isNotBlank())
 
         Spacer(modifier = Modifier.height(8.dp))
         Text(text = "Food log", style = MaterialTheme.typography.titleMedium, color = Color.White)

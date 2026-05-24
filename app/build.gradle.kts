@@ -49,6 +49,7 @@ android {
     buildConfigField("String", "PEXELS_API_KEY", "\"${localProp("PEXELS_API_KEY")}\"")
     buildConfigField("String", "ELEVENLABS_API_KEY", "\"${localProp("ELEVENLABS_API_KEY")}\"")
     buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"${localProp("ELEVENLABS_VOICE_ID")}\"")
+    buildConfigField("String", "GOOGLE_PLACES_API_KEY", "\"${localProp("GOOGLE_PLACES_API_KEY")}\"")
   }
 
   buildTypes {
@@ -95,6 +96,7 @@ dependencies {
   implementation(libs.androidx.room.runtime)
   implementation(libs.androidx.room.ktx)
   ksp(libs.androidx.room.compiler)
+  implementation(libs.play.services.location)
   androidTestImplementation(libs.androidx.ui.test.junit4)
   androidTestImplementation(libs.androidx.test.uiautomator)
   androidTestImplementation(libs.androidx.test.rules)

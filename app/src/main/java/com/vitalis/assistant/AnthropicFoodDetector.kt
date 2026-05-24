@@ -21,6 +21,17 @@ private const val ANTHROPIC_VERSION = "2023-06-01"
 private const val MODEL = "claude-haiku-4-5-20251001"
 private const val TOOL_NAME = "log_foods"
 
+private const val GATE_PROMPT =
+    "You are a fast visual classifier. This image is a first-person POV from smart glasses — what " +
+        "the wearer is actually looking at. Decide whether the wearer is about to eat or drink " +
+        "something RIGHT NOW. Answer YES only if a food or drink item is CLOSE to the wearer: " +
+        "directly in their hands, at their place setting, on the near edge of the table in front " +
+        "of them (within arm's reach), or being raised toward their mouth. Answer NO if the food " +
+        "is across the table, on someone else's plate, on a distant counter, behind glass, on a " +
+        "menu/poster/screen, or otherwise out of reach. Also NO for empty scenes (walls, " +
+        "furniture, scenery, people without visible close food). Respond with exactly one word: " +
+        "YES or NO. No punctuation, no explanation."
+
 private val JSON = "application/json".toMediaType()
 
 class AnthropicFoodDetector(
@@ -49,10 +60,26 @@ class AnthropicFoodDetector(
           Log.w(TAG, "Missing ANTHROPIC_API_KEY — skipping detection")
           return@withContext emptyList()
         }
-        val imageB64 = BitmapEncoding.toBase64Jpeg(bitmap, maxDim = 768, quality = 75)
+        // Cheap pre-gate: if the scene clearly contains no food, skip the expensive tool call.
+        if (!isFoodScene(bitmap)) return@withContext emptyList()
+
+        val imageB64 = BitmapEncoding.toBase64Jpeg(bitmap, maxDim = 1024, quality = 85)
         val body = buildBody(imageB64, avoidanceLine, recentlyLoggedLabels)
         val responseText = post(body) ?: return@withContext emptyList()
         parseDetections(responseText)
+      }
+
+  /** Yes/no gate run before the heavy tool-use detector. */
+  suspend fun isFoodScene(bitmap: Bitmap): Boolean =
+      withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext false
+        val imageB64 = BitmapEncoding.toBase64Jpeg(bitmap, maxDim = 768, quality = 70)
+        val body = buildClassifierBody(imageB64, GATE_PROMPT)
+        val responseText = post(body) ?: return@withContext false
+        val text = extractFirstText(responseText)?.trim()?.uppercase().orEmpty()
+        val verdict = text.startsWith("YES")
+        Log.d(TAG, "Food-scene gate -> '$text' (verdict=$verdict)")
+        verdict
       }
 
   private fun buildBody(
@@ -156,9 +183,12 @@ class AnthropicFoodDetector(
         else recentlyLoggedLabels.joinToString(", ")
 
     return """
-        You are a nutrition vision assistant analyzing a live first-person camera frame. Identify each
-        distinct food or drink item the person could eat or drink in the frame. Report every item by
-        calling $TOOL_NAME. For each item:
+        You are a nutrition vision assistant analyzing a live first-person camera frame from the
+        wearer's smart glasses. Identify ONLY food or drink items that are CLOSE to the wearer —
+        in their hands, at their place setting, on the near edge of the table within arm's reach,
+        or being raised toward their mouth. Ignore food across the table, on someone else's plate,
+        on a distant counter, in a display case, on a menu/poster/screen, or otherwise out of reach.
+        Report every qualifying item by calling $TOOL_NAME. For each item:
           - label: if it clearly matches one of the KNOWN LABELS, copy that label EXACTLY;
             otherwise null.
           - name: a short, canonical, lowercase noun for the item with no modifiers — e.g. "coffee"
@@ -174,6 +204,52 @@ class AnthropicFoodDetector(
         conceptually the same, even if you would phrase it slightly differently): $recent
         """.trimIndent()
   }
+
+  private fun buildClassifierBody(imageBase64: String, textPrompt: String): String {
+    val source =
+        JSONObject().apply {
+          put("type", "base64")
+          put("media_type", "image/jpeg")
+          put("data", imageBase64)
+        }
+    val imagePart = JSONObject().apply {
+      put("type", "image")
+      put("source", source)
+    }
+    val textPart = JSONObject().apply {
+      put("type", "text")
+      put("text", textPrompt)
+    }
+    val message =
+        JSONObject().apply {
+          put("role", "user")
+          put("content", JSONArray().put(imagePart).put(textPart))
+        }
+    return JSONObject()
+        .apply {
+          put("model", MODEL)
+          put("max_tokens", 5)
+          put("messages", JSONArray().put(message))
+        }
+        .toString()
+  }
+
+  private fun extractFirstText(responseJson: String): String? =
+      try {
+        val arr = JSONObject(responseJson).optJSONArray("content") ?: return null
+        var result: String? = null
+        for (i in 0 until arr.length()) {
+          val block = arr.getJSONObject(i)
+          if (block.optString("type") == "text") {
+            result = block.optString("text").orEmpty()
+            break
+          }
+        }
+        result
+      } catch (e: Exception) {
+        Log.e(TAG, "Failed to parse classifier response", e)
+        null
+      }
 
   private fun post(body: String): String? {
     val req =

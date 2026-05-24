@@ -16,5 +16,8 @@ interface FoodLogDao {
   @Query("SELECT * FROM food_log WHERE timestamp BETWEEN :startMs AND :endMs ORDER BY timestamp ASC")
   fun observeForRange(startMs: Long, endMs: Long): Flow<List<FoodLogEntity>>
 
+  @Query("SELECT * FROM food_log WHERE timestamp >= :sinceMs ORDER BY timestamp DESC")
+  suspend fun listSince(sinceMs: Long): List<FoodLogEntity>
+
   @Query("DELETE FROM food_log") suspend fun clear()
 }

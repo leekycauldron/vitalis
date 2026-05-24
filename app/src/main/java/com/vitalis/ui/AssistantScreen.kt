@@ -1,7 +1,10 @@
 package com.vitalis.ui
 
+import android.Manifest
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.LocalActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -15,7 +18,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -24,13 +26,11 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.RestaurantMenu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -62,6 +62,7 @@ import com.vitalis.assistant.AssistantPhase
 import com.vitalis.assistant.AssistantViewModel
 import com.vitalis.assistant.MenuRecommendation
 import com.vitalis.stream.StreamViewModel
+import com.vitalis.voice.VoicePhase
 import com.vitalis.wearables.WearablesViewModel
 import kotlin.math.min
 
@@ -91,15 +92,42 @@ fun AssistantScreen(
   val assistantState by assistantViewModel.uiState.collectAsStateWithLifecycle()
   val recentLog by assistantViewModel.recentFoodLog.collectAsStateWithLifecycle()
 
+  val locationPermissionLauncher =
+      rememberLauncherForActivityResult(
+          contract = ActivityResultContracts.RequestMultiplePermissions(),
+      ) { results ->
+        val granted =
+            results[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                results[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (granted) {
+          assistantViewModel.onLocationPermissionGranted()
+          assistantViewModel.runRestaurantSearch()
+        } else {
+          assistantViewModel.onLocationPermissionDenied()
+        }
+      }
+
   // Start the live stream + passive food logging when this screen is composed.
+  // Also expose captureStill to the VM so the voice agent can trigger a menu scan.
   DisposableEffect(Unit) {
     streamViewModel.startStream()
     assistantViewModel.startFoodLogging()
+    assistantViewModel.captureStillProvider = { streamViewModel.captureMenuStill() }
     onDispose {
+      assistantViewModel.captureStillProvider = null
       assistantViewModel.stopFoodLogging()
       streamViewModel.stopStream()
     }
   }
+
+  // RECORD_AUDIO launcher — request just-in-time when the mic is tapped.
+  val recordAudioLauncher =
+      rememberLauncherForActivityResult(
+          contract = ActivityResultContracts.RequestPermission(),
+      ) { granted ->
+        if (granted) assistantViewModel.startVoiceTurn()
+        // If denied, the VoiceState will stay IDLE; user can retry from settings.
+      }
 
   // Push the latest video frame into the assistant for sampling.
   LaunchedEffect(streamState.videoFrame) {
@@ -202,7 +230,8 @@ fun AssistantScreen(
         }
       }
 
-      // --- Bottom: food log overlay (when logging) + status pill + phase-specific button ---
+      // --- Bottom: food log overlay (when logging) + voice overlay + phase-specific control ---
+      val context = androidx.compose.ui.platform.LocalContext.current
       Column(
           modifier =
               Modifier.align(Alignment.BottomCenter)
@@ -219,14 +248,40 @@ fun AssistantScreen(
 
         assistantState.statusMessage?.let { StatusPill(text = it) }
 
+        // Voice overlay is rendered whenever the voice state isn't fully idle.
+        if (assistantState.voice.phase != VoicePhase.IDLE ||
+            !assistantState.voice.response.isNullOrBlank()) {
+          VoiceOverlay(
+              state = assistantState.voice,
+              onDismiss = {
+                assistantViewModel.cancelVoice()
+                assistantViewModel.dismissVoiceOverlay()
+              },
+          )
+        }
+
         when (assistantState.phase) {
           AssistantPhase.LOGGING -> {
-            ScanMenuButton(
+            // Single mic button replaces the old Scan menu + Find food row.
+            MicButton(
+                listening = assistantState.voice.phase == VoicePhase.LISTENING,
                 onClick = {
-                  assistantViewModel.startMenuScanning {
-                    streamViewModel.captureMenuStill()
+                  if (assistantState.voice.phase == VoicePhase.LISTENING ||
+                      assistantState.voice.phase == VoicePhase.THINKING) {
+                    assistantViewModel.cancelVoice()
+                  } else {
+                    val granted =
+                        androidx.core.content.ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO,
+                        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    if (granted) {
+                      assistantViewModel.startVoiceTurn()
+                    } else {
+                      recordAudioLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
                   }
-                }
+                },
             )
           }
           AssistantPhase.MENU_SCANNING -> {
@@ -269,20 +324,25 @@ fun AssistantScreen(
           )
         }
       }
-    }
-  }
-}
 
-@Composable
-private fun ScanMenuButton(onClick: () -> Unit) {
-  Button(
-      onClick = onClick,
-      modifier = Modifier.fillMaxWidth().height(56.dp),
-      shape = RoundedCornerShape(20.dp),
-  ) {
-    Icon(Icons.Default.RestaurantMenu, contentDescription = null)
-    Spacer(modifier = Modifier.width(8.dp))
-    Text("Scan menu", style = MaterialTheme.typography.titleMedium)
+      // --- Restaurant finder sheet ---
+      if (assistantState.restaurantSearch.visible) {
+        RestaurantFinderSheet(
+            state = assistantState.restaurantSearch,
+            onQueryChange = { assistantViewModel.setRestaurantQuery(it) },
+            onSubmit = { assistantViewModel.runRestaurantSearch() },
+            onRequestLocationPermission = {
+              locationPermissionLauncher.launch(
+                  arrayOf(
+                      Manifest.permission.ACCESS_FINE_LOCATION,
+                      Manifest.permission.ACCESS_COARSE_LOCATION,
+                  )
+              )
+            },
+            onDismiss = { assistantViewModel.closeRestaurantSearch() },
+        )
+      }
+    }
   }
 }
 

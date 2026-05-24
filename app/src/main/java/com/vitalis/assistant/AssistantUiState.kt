@@ -2,6 +2,8 @@ package com.vitalis.assistant
 
 import android.graphics.Bitmap
 import android.graphics.Rect
+import com.vitalis.placesearch.Restaurant
+import com.vitalis.voice.VoiceState
 
 enum class AssistantPhase {
   /** Default: stream + passive food sampling running. */
@@ -15,6 +17,16 @@ enum class AssistantPhase {
   ERROR,
 }
 
+enum class RestaurantSearchPhase {
+  IDLE,
+  /** Waiting for the user to grant location permission. */
+  NEEDS_LOCATION_PERMISSION,
+  /** Fetching device location or hitting Places API. */
+  LOADING,
+  RESULTS,
+  ERROR,
+}
+
 data class MenuRecommendation(
     val id: String,
     val itemName: String,
@@ -24,6 +36,14 @@ data class MenuRecommendation(
     val pexelsImageUrl: String?,
 )
 
+data class RestaurantSearchState(
+    val visible: Boolean = false,
+    val phase: RestaurantSearchPhase = RestaurantSearchPhase.IDLE,
+    val query: String = "",
+    val results: List<Restaurant> = emptyList(),
+    val errorMessage: String? = null,
+)
+
 data class AssistantUiState(
     val phase: AssistantPhase = AssistantPhase.LOGGING,
     val capturedMenu: Bitmap? = null,
@@ -31,4 +51,6 @@ data class AssistantUiState(
     val selectedRecommendationId: String? = null,
     val statusMessage: String? = null,
     val errorMessage: String? = null,
+    val restaurantSearch: RestaurantSearchState = RestaurantSearchState(),
+    val voice: VoiceState = VoiceState(),
 )
