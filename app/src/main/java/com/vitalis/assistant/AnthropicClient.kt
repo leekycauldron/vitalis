@@ -28,7 +28,17 @@ private const val MENU_CLASSIFIER_PROMPT =
         "recommendation from. A plain table, food on a plate, or an unreadable blur is NOT a menu. " +
         "Respond with exactly one word: YES or NO. No punctuation, no explanation."
 
-data class Recommendation(val itemName: String, val reason: String)
+data class Recommendation(
+    /** Cleanly-spelled dish name Sonnet read from the menu image (shown to the user). */
+    val itemName: String,
+    val reason: String,
+    /**
+     * Verbatim OCR line where this dish appears (possibly misspelled). Used to look up the
+     * bounding box for the on-menu pulsating dot. Null if Sonnet didn't return one — caller
+     * should fall back to fuzzy-matching [itemName].
+     */
+    val matchText: String?,
+)
 
 class AnthropicClient(private val apiKey: String) {
 
@@ -77,9 +87,7 @@ class AnthropicClient(private val apiKey: String) {
             )
         val responseText = postMessages(body) ?: return@withContext emptyList()
         val text = extractFirstText(responseText).orEmpty()
-        val parsed = parseRecommendations(text)
-        val allowedLower = knownMenuItems.map { it.lowercase() }.toSet()
-        parsed.filter { rec -> rec.itemName.lowercase() in allowedLower || allowedLower.any { it.contains(rec.itemName.lowercase()) } }
+        parseRecommendations(text)
       }
 
   private fun buildRecommendPrompt(
@@ -100,15 +108,38 @@ class AnthropicClient(private val apiKey: String) {
         VOICE PREFERENCE expressed by the user just now (e.g. "I'm in the mood for steak"):
         $voiceBlock
 
-        OCR-extracted menu items (use these EXACT strings for item_name; do not invent items):
+        You are seeing two things together: (1) a photo of the menu, and (2) an on-device OCR
+        dump of every text line in that photo. The OCR is noisy — it routinely misspells words
+        ("della" → "cella", "Margherita" → "Margerita") and includes non-dish lines (restaurant
+        name, section headers like "STARTERS"/"Pasta"/"Drinks", descriptions, prices, page
+        numbers, addresses).
+
+        OCR LINES (verbatim, may be misspelled — use only to anchor a bounding box):
         $itemsBlock
 
-        Pick 1 to 3 items from the list above that best fit ALL of: profile, DNA, today's macro
-        deficits, and the voice preference (if any). Weight macro shortfall heavily — if protein is
-        low, lean protein. If the user is over their carb target, deprioritise heavy carbs.
+        Read the actual dish names from the IMAGE (not the OCR text). Pick 1 to 3 SPECIFIC dishes
+        or drinks that best fit ALL of: profile, DNA, today's macro deficits, and the voice
+        preference (if any). Weight macro shortfall heavily — if protein is low, lean protein. If
+        the user is over their carb target, deprioritise heavy carbs.
 
-        Respond with a single JSON object, no prose, no code fences. Schema:
-        {"recommendations":[{"item_name":"<exact string from list>","reason":"<one sentence weighing the user context>"}]}
+        For each pick return:
+        - item_name: the dish/drink name spelled CORRECTLY (e.g. "Margherita Pizza",
+          "Grilled Branzino", "Iced Matcha Latte"). Read from the image, fix OCR typos.
+        - match_text: the exact OCR line above where this dish appears, copy-pasted verbatim
+          INCLUDING any misspellings (e.g. "Margerita Pizza"). This is what we'll search for to
+          place a marker on the menu. If the OCR dropped the dish entirely, return null.
+        - reason: ONE sentence describing what the dish actually IS (key ingredients) AND why it
+          fits the user's macro/profile need. Don't describe the restaurant in the abstract.
+
+        HARD RULES:
+        - item_name MUST be a single orderable dish or drink — NOT the restaurant name (e.g.
+          "Osteria della Luna"), NOT a section header (e.g. "Starters", "Pasta", "From the
+          Grill"), NOT a description, NOT a price.
+        - If you cannot find any clearly orderable dishes in the image, return
+          {"recommendations":[]}.
+
+        Respond with a single JSON object, no prose, no code fences:
+        {"recommendations":[{"item_name":"<clean name>","match_text":"<verbatim OCR line or null>","reason":"<one sentence>"}]}
         """.trimIndent()
   }
 
@@ -202,7 +233,9 @@ class AnthropicClient(private val apiKey: String) {
           val rec = arr.getJSONObject(i)
           val name = rec.optString("item_name").trim()
           val reason = rec.optString("reason").trim()
-          if (name.isNotEmpty()) add(Recommendation(name, reason))
+          val matchText =
+              rec.optString("match_text").trim().takeIf { it.isNotEmpty() && it != "null" }
+          if (name.isNotEmpty()) add(Recommendation(name, reason, matchText))
         }
       }
     } catch (e: Exception) {

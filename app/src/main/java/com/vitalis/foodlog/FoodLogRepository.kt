@@ -5,7 +5,11 @@ import android.util.Log
 import com.vitalis.foodlog.db.FoodLogDao
 import com.vitalis.foodlog.db.FoodLogEntity
 import com.vitalis.foodlog.db.VitalisDatabase
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -60,10 +64,14 @@ data class FoodLogSummary(
     val topItems: List<String>,
 )
 
-class FoodLogRepository(private val dao: FoodLogDao) {
+class FoodLogRepository(
+    private val dao: FoodLogDao,
+    private val mealApi: MealApiClient = MealApiClient(),
+) {
 
   private val cooldown = mutableMapOf<String, Long>()
   private val cooldownLock = Mutex()
+  private val remoteScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
   fun observeRecent(limit: Int = 100): Flow<List<FoodLogEntity>> = dao.observeRecent(limit)
 
@@ -98,6 +106,16 @@ class FoodLogRepository(private val dao: FoodLogDao) {
             wasEstimated = detection.wasEstimated,
         )
     )
+    remoteScope.launch {
+      mealApi.logMeal(
+          name = detection.name,
+          calories = detection.calories,
+          protein = detection.proteinG,
+          carbs = detection.carbsG,
+          fat = detection.fatG,
+          loggedAtMs = now,
+      )
+    }
     return true
   }
 

@@ -332,7 +332,9 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     _uiState.update { it.copy(statusMessage = "Asking Sonnet for recommendations…") }
 
     val anthropic = AnthropicClient(BuildConfig.ANTHROPIC_API_KEY)
-    val itemTexts = ocrLines.map { it.text }
+    // Drop obvious noise (pure prices, single-character lines) so Sonnet has a cleaner allowlist
+    // to pick from. Real dish/section/header lines all stay in.
+    val itemTexts = ocrLines.map { it.text }.filter { line -> !isPriceOrNoise(line) }
     val promptContext = buildPromptContext()
     val recs =
         runCatching {
@@ -363,7 +365,12 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
     val pexels = if (pexelsKey.isNotBlank()) PexelsClient(pexelsKey) else null
 
     val withBoxes = recs.mapNotNull { rec ->
-      val match = matchToOcrLine(rec.itemName, ocrLines) ?: return@mapNotNull null
+      // Prefer the verbatim OCR snippet Sonnet tagged (handles misspellings); fall back to
+      // fuzzy-matching the cleanly-spelled item name against OCR lines.
+      val match =
+          rec.matchText?.let { matchToOcrLine(it, ocrLines) }
+              ?: matchToOcrLine(rec.itemName, ocrLines)
+              ?: return@mapNotNull null
       MenuRecommendation(
           id = UUID.randomUUID().toString(),
           itemName = rec.itemName,
@@ -406,10 +413,67 @@ class AssistantViewModel(application: Application) : AndroidViewModel(applicatio
   }
 
   private fun matchToOcrLine(itemName: String, ocrLines: List<OcrLine>): OcrLine? {
-    val target = itemName.lowercase()
-    return ocrLines.firstOrNull { it.text.lowercase() == target }
-        ?: ocrLines.firstOrNull { it.text.lowercase().contains(target) }
-        ?: ocrLines.firstOrNull { target.contains(it.text.lowercase()) }
+    val target = itemName.lowercase().trim()
+    if (target.isEmpty()) return null
+
+    // Tier 1 — exact match, then substring (either direction).
+    ocrLines.firstOrNull { it.text.lowercase().trim() == target }?.let { return it }
+    ocrLines.firstOrNull { it.text.lowercase().contains(target) }?.let { return it }
+    ocrLines.firstOrNull { target.contains(it.text.lowercase()) }?.let { return it }
+
+    // Tier 2 — fuzzy. Score each OCR line by token-prefix overlap with the target. Handles
+    // OCR typos like "Margerita Pizza" vs "Margherita Pizza" — words share 5+ leading chars.
+    val targetWords = tokenize(target)
+    if (targetWords.isEmpty()) return null
+    var best: OcrLine? = null
+    var bestScore = 0
+    for (line in ocrLines) {
+      val score = tokenOverlap(targetWords, tokenize(line.text.lowercase()))
+      if (score > bestScore) {
+        bestScore = score
+        best = line
+      }
+    }
+    // Require at least one strongly-overlapping word to avoid garbage matches.
+    return if (bestScore >= 4) best else null
+  }
+
+  private fun tokenize(s: String): List<String> =
+      s.split(Regex("[^a-z0-9]+")).filter { it.length >= 3 }
+
+  /** Sum of leading-char overlap across the best-aligned word pairs. */
+  private fun tokenOverlap(a: List<String>, b: List<String>): Int {
+    if (a.isEmpty() || b.isEmpty()) return 0
+    var total = 0
+    for (wa in a) {
+      var bestForWord = 0
+      for (wb in b) {
+        val n = commonPrefixLen(wa, wb)
+        // Also count a fully-contained shorter word as a strong match.
+        val containedBonus =
+            if (n < wa.length && (wa.contains(wb) || wb.contains(wa))) minOf(wa.length, wb.length)
+            else 0
+        bestForWord = maxOf(bestForWord, n, containedBonus)
+      }
+      total += bestForWord
+    }
+    return total
+  }
+
+  private fun commonPrefixLen(a: String, b: String): Int {
+    val n = minOf(a.length, b.length)
+    var i = 0
+    while (i < n && a[i] == b[i]) i++
+    return i
+  }
+
+  /** True if the OCR line is a price, currency symbol, page number, or sub-character noise. */
+  private fun isPriceOrNoise(line: String): Boolean {
+    val trimmed = line.trim()
+    if (trimmed.length < 3) return true
+    // Pure price patterns: "12", "12.50", "$12", "12.50€", "€ 12,50", "12.50 USD"
+    val priceRegex = Regex("""^[\p{Sc}€$£¥]?\s*\d+([.,]\d{1,2})?\s*[\p{Sc}€$£¥]?\s*[A-Za-z]{0,3}\.?$""")
+    return priceRegex.matches(trimmed)
   }
 
   fun selectRecommendation(id: String?) {

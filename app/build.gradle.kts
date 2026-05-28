@@ -50,6 +50,8 @@ android {
     buildConfigField("String", "ELEVENLABS_API_KEY", "\"${localProp("ELEVENLABS_API_KEY")}\"")
     buildConfigField("String", "ELEVENLABS_VOICE_ID", "\"${localProp("ELEVENLABS_VOICE_ID")}\"")
     buildConfigField("String", "GOOGLE_PLACES_API_KEY", "\"${localProp("GOOGLE_PLACES_API_KEY")}\"")
+    buildConfigField("String", "MEAL_API_URL", "\"${localProp("MEAL_API_URL")}\"")
+    buildConfigField("String", "MEAL_API_SECRET", "\"${localProp("MEAL_API_SECRET")}\"")
   }
 
   buildTypes {
